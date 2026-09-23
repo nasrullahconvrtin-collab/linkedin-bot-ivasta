@@ -125,8 +125,21 @@ export default function Profiles() {
       const isSuper = isSuperAdminUser();
       const orgId = getActiveOrganizationId();
       const validAccIds = new Set((profiles || []).map(p => p.unipile_account_id).filter(Boolean));
+      if (validAccIds.size === 0) {
+        setAccountInfo(null);
+        setConnections([]);
+        setInvitations([]);
+        setSelectedAccId('');
+        if (typeof window !== 'undefined' && window.localStorage) {
+          localStorage.removeItem('lf_selected_account_id');
+          localStorage.removeItem('lf_active_account_id');
+        }
+        setNetLoading(false);
+        return;
+      }
+
       let accToUse = targetId || selectedAccId || (typeof window !== 'undefined' ? localStorage.getItem('lf_selected_account_id') : null) || null;
-      if (accToUse && validAccIds.size > 0 && !validAccIds.has(accToUse)) {
+      if (accToUse && !validAccIds.has(accToUse)) {
         accToUse = profiles[0]?.unipile_account_id || null;
         if (typeof window !== 'undefined' && window.localStorage) {
           if (accToUse) localStorage.setItem('lf_selected_account_id', accToUse);
@@ -138,9 +151,10 @@ export default function Profiles() {
       }
 
       let pQuery = supabaseDirect.from('prospects').select('*');
-      if (!isSuper) {
-        if (orgId) pQuery = pQuery.eq('organization_id', orgId);
-        else if (userAcc?.email) pQuery = pQuery.eq('user_email', userAcc.email.toLowerCase());
+      if (orgId) {
+        pQuery = pQuery.eq('organization_id', orgId);
+      } else if (userAcc?.email) {
+        pQuery = pQuery.eq('user_email', userAcc.email.toLowerCase());
       }
 
       const [accRes, connRes, invRes, pRes] = await Promise.all([
@@ -184,8 +198,12 @@ export default function Profiles() {
   useEffect(() => {
     loadNetworkData();
     if (typeof window !== 'undefined' && window.location.search.includes('hosted_success=true')) {
+      const urlParams = new URLSearchParams(window.location.search);
+      const accIdFromUrl = urlParams.get('account_id');
       window.history.replaceState({}, '', window.location.pathname);
-      handleSyncHostedAccount();
+      if (accIdFromUrl) {
+        handleSyncHostedAccount(accIdFromUrl);
+      }
     }
   }, []);
 
@@ -320,8 +338,9 @@ export default function Profiles() {
     setSavingSettings(true);
     try {
       // Use directCreateProfile so organization_id is always stamped on the row
+      const existingKey = matchedProfile?.profile_key || (editAccId ? `profile_${editAccId}` : `profile_${Date.now()}`);
       await directCreateProfile({
-        profile_key: 'profile_1',
+        profile_key: existingKey,
         display_name: editName || 'LinkedIn Profile',
         unipile_account_id: editAccId,
         session_active: true,
@@ -436,7 +455,7 @@ export default function Profiles() {
       const res = await createUnipileHostedLink(redirectUrl);
       if (res.success && res.url) {
         window.open(res.url, '_blank');
-        toast.success('Opened LinkedIn authentication window. Once connected, click "Sync Connected Account" below!');
+        toast.success('Opened LinkedIn authentication window. Complete login to link your account.');
       } else {
         toast.error(res.error || 'Failed to generate connection link');
       }
@@ -447,17 +466,21 @@ export default function Profiles() {
     }
   };
 
-  const handleSyncHostedAccount = async () => {
+  const handleSyncHostedAccount = async (targetAccId = null) => {
+    if (!targetAccId) {
+      toast.error('Account ID is required to link an account.');
+      return;
+    }
     setLoading(true);
     try {
-      const res = await importNewestUnipileAccount();
+      const res = await importNewestUnipileAccount(targetAccId);
       if (res.success) {
         toast.success(`Connected & saved: ${res.account?.name || 'LinkedIn Profile'}!`);
         setModal(false);
         await fetchProfiles();
         loadNetworkData();
       } else {
-        toast.error(res.error || 'No connected LinkedIn account detected on Unipile yet');
+        toast.error(res.error || 'Failed to connect LinkedIn account');
       }
     } catch (err) {
       toast.error(err.message);
@@ -879,15 +902,6 @@ export default function Profiles() {
                 >
                   {loading ? <Loader2 size={15} className="animate-spin" /> : <ExternalLink size={15} />}
                   Connect via Official LinkedIn Link
-                </button>
-                <button
-                  type="button"
-                  onClick={handleSyncHostedAccount}
-                  disabled={loading}
-                  className="w-full py-2 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 border border-indigo-500/20 font-semibold text-xs rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
-                >
-                  {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-                  Check & Sync Connected Account
                 </button>
               </div>
 

@@ -1,14 +1,14 @@
 import { createClient } from '@supabase/supabase-js';
 
 const ENV_URL = import.meta.env.VITE_SUPABASE_URL;
-const SUPABASE_URL = (ENV_URL && !ENV_URL.includes('mhzvxnbnaytirrgiwsnv') && !ENV_URL.includes('lupbvrgmkovpohjnbddf'))
+const SUPABASE_URL = (ENV_URL && !ENV_URL.includes('mjwganpjawthnowemabt') && !ENV_URL.includes('mhzvxnbnaytirrgiwsnv'))
   ? ENV_URL
-  : 'https://mjwganpjawthnowemabt.supabase.co';
+  : 'https://lupbvrgmkovpohjnbddf.supabase.co';
 
 const ENV_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
-const SUPABASE_ANON_KEY = (ENV_KEY && !ENV_KEY.includes('sb_publishable_gn93SdRFAAvpnH6faute9g_n8DiwZ_j') && !ENV_KEY.includes('sb_publishable_Ybu1D-FMVkpgJ-Z4y6KoIQ_A5Eo-M24'))
+const SUPABASE_ANON_KEY = (ENV_KEY && !ENV_KEY.includes('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1qd2dhbnBqYXd0aG5vd2VtYWJ0') && !ENV_KEY.includes('sb_publishable_gn93SdRFAAvpnH6faute9g_n8DiwZ_j'))
   ? ENV_KEY
-  : 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1qd2dhbnBqYXd0aG5vd2VtYWJ0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODYzMDczMTUsImV4cCI6MjEwMTg4MzMxNX0.OwKeHoH2DH-jS7-_XRf6Vkx4bNZPKgbL9WOr5oSd27c';
+  : 'sb_publishable_Ybu1D-FMVkpgJ-Z4y6KoIQ_A5Eo-M24';
 
 const UNIPILE_API_KEY = 'vpftWHjq.lC9ACICdkDlLNupo90avQybHg2UjAtAkMssKHxsEw9o=';
 const UNIPILE_BASE_URL = 'https://api63.unipile.com:19339/api/v1';
@@ -326,30 +326,37 @@ export const directGetProfiles = async () => {
     console.warn('Supabase fetch error:', e);
   }
 
-  // Return empty array if no profiles exist
+  // Workspace has NO profile connected — wipe any stale account pointers from localStorage
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      localStorage.removeItem('lf_selected_account_id');
+      localStorage.removeItem('lf_active_account_id');
+    }
+  } catch (e) {}
+
+  // Return empty array if no profiles exist for this workspace
   return [];
 };
 
-export const directImportNewestUnipileAccount = async () => {
+export const directImportNewestUnipileAccount = async (targetAccountId = null) => {
+  if (!targetAccountId) {
+    return { success: false, error: 'Target account ID is required. Automatic discovery of arbitrary accounts is disabled to prevent cross-account linking.' };
+  }
   try {
-    const unipileRes = await unipileFetch('/accounts');
-    if (unipileRes.ok && unipileRes.data?.items) {
-      const activeUnipileAccs = unipileRes.data.items.filter(a => a.type === 'LINKEDIN');
-      if (activeUnipileAccs.length > 0) {
-        activeUnipileAccs.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
-        const latestAcc = activeUnipileAccs[0];
-        const accId = latestAcc.id;
-        const accName = latestAcc.name || latestAcc.connection_params?.im?.username || 'LinkedIn Profile';
-        await directCreateProfile({
-          profile_key: `profile_${accId}`,
-          display_name: accName,
-          unipile_account_id: accId,
-          session_active: true
-        });
-        return { success: true, account: latestAcc };
-      }
+    const unipileRes = await unipileFetch(`/accounts/${targetAccountId}`);
+    if (unipileRes.ok && unipileRes.data) {
+      const targetAcc = unipileRes.data;
+      const accId = targetAcc.id;
+      const accName = targetAcc.name || targetAcc.connection_params?.im?.username || 'LinkedIn Profile';
+      await directCreateProfile({
+        profile_key: `profile_${accId}`,
+        display_name: accName,
+        unipile_account_id: accId,
+        session_active: true
+      });
+      return { success: true, account: targetAcc };
     }
-    return { success: false, error: 'No LinkedIn account found on Unipile' };
+    return { success: false, error: `Account ${targetAccountId} not found on Unipile` };
   } catch (e) {
     return { success: false, error: e.message };
   }
@@ -441,7 +448,14 @@ export const directDisconnectProfile = async (targetId = null) => {
         }
 
         if (shouldDelete) {
-          await supabaseDirect.from('profiles').delete().eq('id', p.id);
+          const pOrgId = p.organization_id || p.settings?.organization_id || p.settings?.orgId;
+          const pEmail = (p.user_email || p.settings?.user_email || p.settings?.email || '').toLowerCase();
+          const canDelete = isSuper || (orgId && pOrgId === orgId) || (userEmail && pEmail === userEmail);
+          if (canDelete) {
+            await supabaseDirect.from('profiles').delete().eq('id', p.id);
+          } else {
+            console.warn(`[Security] Blocked unauthorized attempt by org ${orgId} to delete profile ${p.id}`);
+          }
         }
       }
     }
@@ -735,16 +749,7 @@ export const directGetCampaigns = async () => {
   try {
     let campaignQuery = supabaseDirect.from('campaigns').select('*').order('created_at', { ascending: false });
     if (isValidUuid(orgId)) campaignQuery = campaignQuery.eq('organization_id', orgId);
-    let { data: rawCampaigns, error } = await campaignQuery;
-
-    // Fallback: If org-filtered query returned 0 campaigns, query all campaigns in database
-    // This prevents a stale cross-database localStorage organization_id from hiding active campaigns
-    if (!error && (!rawCampaigns || rawCampaigns.length === 0) && isValidUuid(orgId)) {
-      const { data: allCamp } = await supabaseDirect.from('campaigns').select('*').order('created_at', { ascending: false });
-      if (allCamp && allCamp.length > 0) {
-        rawCampaigns = allCamp;
-      }
-    }
+    const { data: rawCampaigns, error } = await campaignQuery;
 
     if (!error && rawCampaigns) {
       const campaigns = rawCampaigns;
@@ -1025,17 +1030,7 @@ export const directGetProspects = async (params = {}) => {
     const offset = params.offset !== undefined ? Number(params.offset) : ((params.page || 1) - 1) * limit;
     query = query.range(offset, offset + limit - 1);
     
-    let { data: rawData, count, error } = await query;
-
-    // Fallback: If org filter returned 0 prospects, query all prospects in this database
-    if (!error && (!rawData || rawData.length === 0) && !params.campaign_id && !params.status && !params.list_id && isValidUuid(orgId)) {
-      const fallbackQuery = supabaseDirect.from('prospects').select('*', { count: 'exact' }).order('created_at', { ascending: false }).range(offset, offset + limit - 1);
-      const { data: fbData, count: fbCount } = await fallbackQuery;
-      if (fbData && fbData.length > 0) {
-        rawData = fbData;
-        count = fbCount;
-      }
-    }
+    const { data: rawData, count, error } = await query;
 
     if (!error && rawData) {
       return { prospects: rawData, total: count || rawData.length };
@@ -1218,10 +1213,14 @@ export const directBulkImportProspects = async (file, columnMapping = null, impo
 
         const effectiveOrgId = campaignOrgId || (isValidUuid(rawOrgId) ? rawOrgId : null);
 
-        // Fetch existing prospects to build maps
-        const { data: existingList } = await supabaseDirect
+        // Fetch existing prospects to build maps strictly for this organization
+        let existQuery = supabaseDirect
           .from('prospects')
           .select('id, linkedin_url, email, status, connection_status, member_id, provider_id, custom_variables, name, first_name, last_name, company, job_title, location, campaign_id, organization_id');
+        if (effectiveOrgId) {
+          existQuery = existQuery.eq('organization_id', effectiveOrgId);
+        }
+        const { data: existingList } = await existQuery;
 
         // Fetch prospects already enrolled in THIS campaign via campaign_enrollments
         const enrolledInCampaignSet = new Set();
@@ -2009,7 +2008,34 @@ export const directGetUnipileChats = async (limit = 50, overrideAccountId = null
   }
   const { ok, data } = await unipileFetch(`/chats?account_id=${accountId}&limit=${limit}`);
   if (ok && data) {
-    return { success: true, chats: data.items || data.chats || [] };
+    const rawChats = data.items || data.chats || [];
+
+    // Parallel fetch attendees for chats to resolve real LinkedIn names and profile avatars
+    const enrichedChats = await Promise.all(
+      rawChats.map(async (c) => {
+        if (c.name && c.avatar_url) return c;
+        try {
+          const { ok: attOk, data: attData } = await unipileFetch(`/chats/${c.id}/attendees?account_id=${accountId}`);
+          if (attOk && attData?.items) {
+            const attendee = attData.items.find(a => !a.is_self) || attData.items[0];
+            if (attendee) {
+              return {
+                ...c,
+                name: c.name || attendee.name || null,
+                avatar_url: attendee.picture_url || null,
+                headline: attendee.specifics?.occupation || null,
+                attendee_provider_id: c.attendee_provider_id || attendee.provider_id || null,
+                attendee_profile_url: attendee.profile_url || null,
+                network_distance: attendee.specifics?.network_distance || null,
+              };
+            }
+          }
+        } catch (e) {}
+        return c;
+      })
+    );
+
+    return { success: true, chats: enrichedChats };
   }
   return { success: false, chats: [] };
 };
@@ -2238,7 +2264,10 @@ export const directRunFlow = async () => {
 
   let campaigns = [];
   try {
-    const { data } = await supabaseDirect.from('campaigns').select('*').eq('status', 'running');
+    const orgId = getActiveOrganizationId();
+    let cQuery = supabaseDirect.from('campaigns').select('*').eq('status', 'running');
+    if (isValidUuid(orgId)) cQuery = cQuery.eq('organization_id', orgId);
+    const { data } = await cQuery;
     campaigns = data || [];
   } catch (err) {
     console.error('Error fetching running campaigns:', err);
